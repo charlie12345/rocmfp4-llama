@@ -1,0 +1,602 @@
+name: Windows CI (ROCmFP4)
+
+on:
+  workflow_dispatch: # allows manual triggering
+  push:
+    branches:
+      - master
+      - mtp-rocmfp4-strix
+      - mtp-copilot-pr1
+    paths:
+      - '.github/workflows/build-windows.yml'
+      - '**/CMakeLists.txt'
+      - '**/.cmake'
+      - '**/*.h'
+      - '**/*.hpp'
+      - '**/*.c'
+      - '**/*.cpp'
+
+  pull_request:
+    types: [opened, synchronize, reopened]
+    branches:
+      - master
+      - mtp-rocmfp4-strix
+    paths:
+      - '.github/workflows/build-windows.yml'
+      - '**/CMakeLists.txt'
+      - '**/.cmake'
+      - '**/*.h'
+      - '**/*.hpp'
+      - '**/*.c'
+      - '**/*.cpp'
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.head_ref && github.ref || github.run_id }}
+  cancel-in-progress: true
+
+env:
+  GGML_NLOOP: 3
+  GGML_N_THREADS: 1
+  LLAMA_LOG_COLORS: 1
+  LLAMA_LOG_PREFIX: 1
+  LLAMA_LOG_TIMESTAMPS: 1
+  OPENBLAS_VERSION: 0.3.23
+  VULKAN_VERSION: 1.4.313.2
+
+jobs:
+  windows-x64-cpu:
+    runs-on: windows-2025
+    name: Windows x64 CPU (Static)
+
+    steps:
+      - name: Clone
+        id: checkout
+        uses: actions/checkout@v6
+
+      - name: ccache
+        uses: ggml-org/ccache-action@v1.2.21
+        with:
+          key: windows-x64-cpu
+          variant: ccache
+          evict-old-files: 1d
+          save: ${{ github.event_name == 'push' && github.ref == 'refs/heads/master' }}
+
+      - name: Install Ninja
+        id: install_ninja
+        run: |
+          choco install ninja
+
+      - name: Build (x64 CPU, Static)
+        id: cmake_build
+        run: |
+          cmake -B build `
+            -G "Ninja Multi-Config" `
+            -D CMAKE_TOOLCHAIN_FILE=cmake/x64-windows-llvm.cmake `
+            -DGGML_NATIVE=OFF `
+            -DLLAMA_BUILD_SERVER=ON `
+            -DLLAMA_BUILD_WEBUI=OFF `
+            -DLLAMA_USE_PREBUILT_WEBUI=OFF `
+            -DLLAMA_OPENSSL=OFF `
+            -DGGML_RPC=ON `
+            -DBUILD_SHARED_LIBS=OFF
+          cmake --build build --config Release
+
+      - name: Test
+        id: cmake_test
+        run: |
+          cd build
+          ctest -L main -C Release -E "test-llama-archs|test-chat" --verbose --timeout 900
+
+      - name: Create artifact archive
+        run: |
+          cd build
+          mkdir -p artifacts
+          copy bin\Release\*.exe artifacts\ 2>nul || true
+          copy bin\Release\*.dll artifacts\ 2>nul || true
+          7z a llama-windows-cpu.7z artifacts\
+
+      - name: Upload artifacts
+        uses: actions/upload-artifact@v6
+        with:
+          name: llama-windows-x64-cpu
+          path: build/llama-windows-cpu.7z
+          retention-days: 7
+
+  windows-x64-openblas:
+    runs-on: windows-2025
+    name: Windows x64 OpenBLAS
+
+    steps:
+      - name: Clone
+        id: checkout
+        uses: actions/checkout@v6
+
+      - name: ccache
+        uses: ggml-org/ccache-action@v1.2.21
+        with:
+          key: windows-x64-openblas
+          variant: ccache
+          evict-old-files: 1d
+          save: ${{ github.event_name == 'push' && github.ref == 'refs/heads/master' }}
+
+      - name: Download OpenBLAS
+        id: get_openblas
+        run: |
+          curl.exe -o $env:RUNNER_TEMP/openblas.zip -L "https://github.com/xianyi/OpenBLAS/releases/download/v${env:OPENBLAS_VERSION}/OpenBLAS-${env:OPENBLAS_VERSION}-x64.zip"
+          curl.exe -o $env:RUNNER_TEMP/OpenBLAS.LICENSE.txt -L "https://github.com/xianyi/OpenBLAS/raw/v${env:OPENBLAS_VERSION}/LICENSE"
+          mkdir $env:RUNNER_TEMP/openblas
+          tar.exe -xvf $env:RUNNER_TEMP/openblas.zip -C $env:RUNNER_TEMP/openblas
+          $vcdir = $(vswhere -latest -products * -requires Microsoft.VisualStudio.Component.VC.Tools.x86.x64 -property installationPath)
+          $msvc = $(join-path $vcdir $('VC\Tools\MSVC\'+$(gc -raw $(join-path $vcdir 'VC\Auxiliary\Build\Microsoft.VCToolsVersion.default.txt')).Trim()))
+          $lib =  $(join-path $msvc 'bin\Hostx64\x64\lib.exe')
+          & $lib /machine:x64 "/def:${env:RUNNER_TEMP}/openblas/lib/libopenblas.def" "/out:${env:RUNNER_TEMP}/openblas/lib/openblas.lib" /name:openblas.dll
+
+      - name: Install Ninja
+        id: install_ninja
+        run: |
+          choco install ninja
+
+      - name: Build (x64 OpenBLAS)
+        id: cmake_build
+        run: |
+          cmake -B build `
+            -G "Ninja Multi-Config" `
+            -D CMAKE_TOOLCHAIN_FILE=cmake/x64-windows-llvm.cmake `
+            -DGGML_NATIVE=OFF `
+            -DLLAMA_BUILD_SERVER=ON `
+            -DLLAMA_BUILD_WEBUI=OFF `
+            -DLLAMA_USE_PREBUILT_WEBUI=OFF `
+            -DLLAMA_OPENSSL=OFF `
+            -DGGML_RPC=ON `
+            -DGGML_BACKEND_DL=ON `
+            -DGGML_CPU_ALL_VARIANTS=ON `
+            -DGGML_OPENMP=OFF `
+            -DGGML_BLAS=ON `
+            -DGGML_BLAS_VENDOR=OpenBLAS `
+            -DBLAS_INCLUDE_DIRS="$env:RUNNER_TEMP/openblas/include" `
+            -DBLAS_LIBRARIES="$env:RUNNER_TEMP/openblas/lib/openblas.lib"
+          cmake --build build --config Release
+
+      - name: Add libopenblas.dll
+        id: add_libopenblas_dll
+        run: |
+          cp $env:RUNNER_TEMP/openblas/bin/libopenblas.dll ./build/bin/Release/openblas.dll
+          cp $env:RUNNER_TEMP/OpenBLAS.LICENSE.txt ./build/bin/Release/OpenBLAS-${env:OPENBLAS_VERSION}.txt
+
+      - name: Test
+        id: cmake_test
+        run: |
+          cd build
+          ctest -L main -C Release --verbose --timeout 900
+
+      - name: Create artifact archive
+        run: |
+          cd build
+          mkdir -p artifacts
+          copy bin\Release\*.exe artifacts\ 2>nul || true
+          copy bin\Release\*.dll artifacts\ 2>nul || true
+          copy "bin\Release\openblas.dll" artifacts\ 2>nul || true
+          7z a llama-windows-openblas.7z artifacts\
+
+      - name: Upload artifacts
+        uses: actions/upload-artifact@v6
+        with:
+          name: llama-windows-x64-openblas
+          path: build/llama-windows-openblas.7z
+          retention-days: 7
+
+  windows-x64-vulkan:
+    runs-on: windows-2025
+    name: Windows x64 Vulkan
+
+    steps:
+      - name: Clone
+        id: checkout
+        uses: actions/checkout@v6
+
+      - name: ccache
+        uses: ggml-org/ccache-action@v1.2.21
+        with:
+          key: windows-x64-vulkan
+          variant: ccache
+          evict-old-files: 1d
+          save: ${{ github.event_name == 'push' && github.ref == 'refs/heads/master' }}
+
+      - name: Install Vulkan SDK
+        id: get_vulkan
+        run: |
+          curl.exe -o $env:RUNNER_TEMP/VulkanSDK-Installer.exe -L "https://sdk.lunarg.com/sdk/download/${env:VULKAN_VERSION}/windows/vulkansdk-windows-X64-${env:VULKAN_VERSION}.exe"
+          & "$env:RUNNER_TEMP\VulkanSDK-Installer.exe" --accept-licenses --default-answer --confirm-command install
+          Add-Content $env:GITHUB_ENV "VULKAN_SDK=C:\VulkanSDK\${env:VULKAN_VERSION}"
+          Add-Content $env:GITHUB_PATH "C:\VulkanSDK\${env:VULKAN_VERSION}\bin"
+
+      - name: Build (x64 Vulkan)
+        id: cmake_build
+        run: |
+          cmake -B build `
+            -DCMAKE_BUILD_TYPE=Release `
+            -DGGML_NATIVE=OFF `
+            -DLLAMA_BUILD_SERVER=ON `
+            -DLLAMA_BUILD_WEBUI=OFF `
+            -DLLAMA_USE_PREBUILT_WEBUI=OFF `
+            -DLLAMA_OPENSSL=OFF `
+            -DGGML_RPC=ON `
+            -DGGML_BACKEND_DL=ON `
+            -DGGML_CPU_ALL_VARIANTS=ON `
+            -DGGML_VULKAN=ON
+          cmake --build build --config Release
+
+      - name: Test
+        id: cmake_test
+        run: |
+          cd build
+          ctest -L main -C Release --verbose --timeout 900
+
+      - name: Create artifact archive
+        run: |
+          cd build
+          mkdir -p artifacts
+          copy bin\Release\*.exe artifacts\ 2>nul || true
+          copy bin\Release\*.dll artifacts\ 2>nul || true
+          7z a llama-windows-vulkan.7z artifacts\
+
+      - name: Upload artifacts
+        uses: actions/upload-artifact@v6
+        with:
+          name: llama-windows-x64-vulkan
+          path: build/llama-windows-vulkan.7z
+          retention-days: 7
+
+  windows-arm64:
+    runs-on: windows-2025
+    name: Windows ARM64
+
+    steps:
+      - name: Clone
+        id: checkout
+        uses: actions/checkout@v6
+
+      - name: ccache
+        uses: ggml-org/ccache-action@v1.2.21
+        with:
+          key: windows-arm64
+          variant: ccache
+          evict-old-files: 1d
+          save: ${{ github.event_name == 'push' && github.ref == 'refs/heads/master' }}
+
+      - name: Install Ninja
+        id: install_ninja
+        run: |
+          choco install ninja
+
+      - name: Build (ARM64)
+        id: cmake_build
+        run: |
+          cmake -B build `
+            -G "Ninja Multi-Config" `
+            -D CMAKE_TOOLCHAIN_FILE=cmake/arm64-windows-llvm.cmake `
+            -DGGML_NATIVE=OFF `
+            -DLLAMA_BUILD_SERVER=ON `
+            -DLLAMA_BUILD_WEBUI=OFF `
+            -DLLAMA_USE_PREBUILT_WEBUI=OFF `
+            -DLLAMA_OPENSSL=OFF
+          cmake --build build --config Release
+
+      - name: Create artifact archive
+        run: |
+          cd build
+          mkdir -p artifacts
+          copy bin\Release\*.exe artifacts\ 2>nul || true
+          copy bin\Release\*.dll artifacts\ 2>nul || true
+          7z a llama-windows-arm64.7z artifacts\
+
+      - name: Upload artifacts
+        uses: actions/upload-artifact@v6
+        with:
+          name: llama-windows-arm64
+          path: build/llama-windows-arm64.7z
+          retention-days: 7
+
+  windows-latest-hip:
+    runs-on: windows-2022
+    name: Windows ROCm (HIP)
+    continue-on-error: true
+
+    env:
+      HIPSDK_INSTALLER_VERSION: "26.Q1"
+
+    steps:
+      - name: Clone
+        id: checkout
+        uses: actions/checkout@v6
+
+      - name: ccache
+        uses: ggml-org/ccache-action@v1.2.21
+        with:
+          key: windows-latest-hip
+          variant: ccache
+          evict-old-files: 1d
+          save: ${{ github.event_name == 'push' && github.ref == 'refs/heads/master' }}
+
+      - name: Use ROCm Installation Cache
+        uses: actions/cache@v5
+        id: cache-rocm
+        with:
+          path: C:\Program Files\AMD\ROCm
+          key: rocm-${{ env.HIPSDK_INSTALLER_VERSION }}-${{ runner.os }}
+
+      - name: Setup ROCm
+        if: steps.cache-rocm.outputs.cache-hit != 'true'
+        uses: ./.github/actions/windows-setup-rocm
+        with:
+          version: ${{ env.HIPSDK_INSTALLER_VERSION }}
+
+      - name: Verify ROCm
+        id: verify
+        run: |
+          # Find and test ROCm installation
+          $clangPath = Get-ChildItem 'C:\Program Files\AMD\ROCm\*\bin\clang.exe' | Select-Object -First 1
+          if (-not $clangPath) {
+            Write-Error "ROCm installation not found"
+            exit 1
+          }
+          & $clangPath.FullName --version
+
+      - name: Install Ninja
+        id: install_ninja
+        run: |
+          choco install ninja
+
+      - name: Build (HIP)
+        id: cmake_build
+        run: |
+          $rocmPath = Get-ChildItem 'C:\Program Files\AMD\ROCm' | Select-Object -First 1 | ForEach-Object { $_.FullName }
+          $env:PATH = "$rocmPath\bin;$env:PATH"
+          
+          cmake -B build `
+            -G "Ninja Multi-Config" `
+            -DCMAKE_C_COMPILER=clang `
+            -DCMAKE_CXX_COMPILER=clang++ `
+            -DGGML_HIP=ON `
+            -DGPU_TARGETS="gfx906;gfx908;gfx90a;gfx1030;gfx1100;gfx1101;gfx1102;gfx1151" `
+            -DGGML_NATIVE=OFF `
+            -DLLAMA_BUILD_SERVER=ON `
+            -DLLAMA_BUILD_WEBUI=OFF `
+            -DLLAMA_USE_PREBUILT_WEBUI=OFF `
+            -DLLAMA_OPENSSL=OFF `
+            -DGGML_RPC=ON `
+            -DGGML_BACKEND_DL=ON
+          cmake --build build --config Release
+
+      - name: Create artifact archive
+        run: |
+          cd build
+          mkdir -p artifacts
+          copy bin\Release\*.exe artifacts\ 2>nul || true
+          copy bin\Release\*.dll artifacts\ 2>nul || true
+          7z a llama-windows-hip.7z artifacts\
+
+      - name: Upload artifacts
+        uses: actions/upload-artifact@v6
+        with:
+          name: llama-windows-hip
+          path: build/llama-windows-hip.7z
+          retention-days: 7
+
+  windows-x64-msvc-cpu:
+    runs-on: windows-2025
+    name: Windows x64 MSVC CPU
+
+    steps:
+      - name: Clone
+        id: checkout
+        uses: actions/checkout@v6
+
+      - name: ccache
+        uses: ggml-org/ccache-action@v1.2.21
+        with:
+          key: windows-x64-msvc-cpu
+          variant: ccache
+          evict-old-files: 1d
+          save: ${{ github.event_name == 'push' && github.ref == 'refs/heads/master' }}
+
+      - name: Install Ninja
+        id: install_ninja
+        run: |
+          choco install ninja
+
+      - name: Setup MSVC
+        id: setup_msvc
+        uses: ilammy/msvc-dev-cmd@v1
+
+      - name: Build (MSVC CPU)
+        id: cmake_build
+        run: |
+          cmake -B build `
+            -G "Ninja Multi-Config" `
+            -DGGML_NATIVE=OFF `
+            -DLLAMA_BUILD_SERVER=ON `
+            -DLLAMA_BUILD_WEBUI=OFF `
+            -DLLAMA_USE_PREBUILT_WEBUI=OFF `
+            -DLLAMA_OPENSSL=OFF `
+            -DGGML_RPC=ON
+          cmake --build build --config Release
+
+      - name: Test
+        id: cmake_test
+        run: |
+          cd build
+          ctest -L main -C Release -E "test-llama-archs|test-chat" --verbose --timeout 900
+
+      - name: Create artifact archive
+        run: |
+          cd build
+          mkdir -p artifacts
+          copy bin\Release\*.exe artifacts\ 2>nul || true
+          copy bin\Release\*.dll artifacts\ 2>nul || true
+          7z a llama-windows-msvc-cpu.7z artifacts\
+
+      - name: Upload artifacts
+        uses: actions/upload-artifact@v6
+        with:
+          name: llama-windows-x64-msvc-cpu
+          path: build/llama-windows-msvc-cpu.7z
+          retention-days: 7
+
+  windows-x64-msvc-openblas:
+    runs-on: windows-2025
+    name: Windows x64 MSVC OpenBLAS
+
+    steps:
+      - name: Clone
+        id: checkout
+        uses: actions/checkout@v6
+
+      - name: ccache
+        uses: ggml-org/ccache-action@v1.2.21
+        with:
+          key: windows-x64-msvc-openblas
+          variant: ccache
+          evict-old-files: 1d
+          save: ${{ github.event_name == 'push' && github.ref == 'refs/heads/master' }}
+
+      - name: Download OpenBLAS
+        id: get_openblas
+        run: |
+          curl.exe -o $env:RUNNER_TEMP/openblas.zip -L "https://github.com/xianyi/OpenBLAS/releases/download/v${env:OPENBLAS_VERSION}/OpenBLAS-${env:OPENBLAS_VERSION}-x64.zip"
+          curl.exe -o $env:RUNNER_TEMP/OpenBLAS.LICENSE.txt -L "https://github.com/xianyi/OpenBLAS/raw/v${env:OPENBLAS_VERSION}/LICENSE"
+          mkdir $env:RUNNER_TEMP/openblas
+          tar.exe -xvf $env:RUNNER_TEMP/openblas.zip -C $env:RUNNER_TEMP/openblas
+          $vcdir = $(vswhere -latest -products * -requires Microsoft.VisualStudio.Component.VC.Tools.x86.x64 -property installationPath)
+          $msvc = $(join-path $vcdir $('VC\Tools\MSVC\'+$(gc -raw $(join-path $vcdir 'VC\Auxiliary\Build\Microsoft.VCToolsVersion.default.txt')).Trim()))
+          $lib =  $(join-path $msvc 'bin\Hostx64\x64\lib.exe')
+          & $lib /machine:x64 "/def:${env:RUNNER_TEMP}/openblas/lib/libopenblas.def" "/out:${env:RUNNER_TEMP}/openblas/lib/openblas.lib" /name:openblas.dll
+
+      - name: Install Ninja
+        id: install_ninja
+        run: |
+          choco install ninja
+
+      - name: Setup MSVC
+        id: setup_msvc
+        uses: ilammy/msvc-dev-cmd@v1
+
+      - name: Build (MSVC OpenBLAS)
+        id: cmake_build
+        run: |
+          cmake -B build `
+            -G "Ninja Multi-Config" `
+            -DGGML_NATIVE=OFF `
+            -DLLAMA_BUILD_SERVER=ON `
+            -DLLAMA_BUILD_WEBUI=OFF `
+            -DLLAMA_USE_PREBUILT_WEBUI=OFF `
+            -DLLAMA_OPENSSL=OFF `
+            -DGGML_RPC=ON `
+            -DGGML_BACKEND_DL=ON `
+            -DGGML_CPU_ALL_VARIANTS=ON `
+            -DGGML_OPENMP=ON `
+            -DGGML_BLAS=ON `
+            -DGGML_BLAS_VENDOR=OpenBLAS `
+            -DBLAS_INCLUDE_DIRS="$env:RUNNER_TEMP/openblas/include" `
+            -DBLAS_LIBRARIES="$env:RUNNER_TEMP/openblas/lib/openblas.lib"
+          cmake --build build --config Release
+
+      - name: Add libopenblas.dll
+        id: add_libopenblas_dll
+        run: |
+          cp $env:RUNNER_TEMP/openblas/bin/libopenblas.dll ./build/bin/Release/openblas.dll
+          cp $env:RUNNER_TEMP/OpenBLAS.LICENSE.txt ./build/bin/Release/OpenBLAS-${env:OPENBLAS_VERSION}.txt
+
+      - name: Test
+        id: cmake_test
+        run: |
+          cd build
+          ctest -L main -C Release --verbose --timeout 900
+
+      - name: Create artifact archive
+        run: |
+          cd build
+          mkdir -p artifacts
+          copy bin\Release\*.exe artifacts\ 2>nul || true
+          copy bin\Release\*.dll artifacts\ 2>nul || true
+          copy "bin\Release\openblas.dll" artifacts\ 2>nul || true
+          7z a llama-windows-msvc-openblas.7z artifacts\
+
+      - name: Upload artifacts
+        uses: actions/upload-artifact@v6
+        with:
+          name: llama-windows-x64-msvc-openblas
+          path: build/llama-windows-msvc-openblas.7z
+          retention-days: 7
+
+  windows-x64-msvc-vulkan:
+    runs-on: windows-2025
+    name: Windows x64 MSVC Vulkan
+
+    steps:
+      - name: Clone
+        id: checkout
+        uses: actions/checkout@v6
+
+      - name: ccache
+        uses: ggml-org/ccache-action@v1.2.21
+        with:
+          key: windows-x64-msvc-vulkan
+          variant: ccache
+          evict-old-files: 1d
+          save: ${{ github.event_name == 'push' && github.ref == 'refs/heads/master' }}
+
+      - name: Install Vulkan SDK
+        id: get_vulkan
+        run: |
+          curl.exe -o $env:RUNNER_TEMP/VulkanSDK-Installer.exe -L "https://sdk.lunarg.com/sdk/download/${env:VULKAN_VERSION}/windows/vulkansdk-windows-X64-${env:VULKAN_VERSION}.exe"
+          & "$env:RUNNER_TEMP\VulkanSDK-Installer.exe" --accept-licenses --default-answer --confirm-command install
+          Add-Content $env:GITHUB_ENV "VULKAN_SDK=C:\VulkanSDK\${env:VULKAN_VERSION}"
+          Add-Content $env:GITHUB_PATH "C:\VulkanSDK\${env:VULKAN_VERSION}\bin"
+
+      - name: Install Ninja
+        id: install_ninja
+        run: |
+          choco install ninja
+
+      - name: Setup MSVC
+        id: setup_msvc
+        uses: ilammy/msvc-dev-cmd@v1
+
+      - name: Build (MSVC Vulkan)
+        id: cmake_build
+        run: |
+          cmake -B build `
+            -G "Ninja Multi-Config" `
+            -DCMAKE_BUILD_TYPE=Release `
+            -DGGML_NATIVE=OFF `
+            -DLLAMA_BUILD_SERVER=ON `
+            -DLLAMA_BUILD_WEBUI=OFF `
+            -DLLAMA_USE_PREBUILT_WEBUI=OFF `
+            -DLLAMA_OPENSSL=OFF `
+            -DGGML_RPC=ON `
+            -DGGML_BACKEND_DL=ON `
+            -DGGML_CPU_ALL_VARIANTS=ON `
+            -DGGML_VULKAN=ON
+          cmake --build build --config Release
+
+      - name: Test
+        id: cmake_test
+        run: |
+          cd build
+          ctest -L main -C Release --verbose --timeout 900
+
+      - name: Create artifact archive
+        run: |
+          cd build
+          mkdir -p artifacts
+          copy bin\Release\*.exe artifacts\ 2>nul || true
+          copy bin\Release\*.dll artifacts\ 2>nul || true
+          7z a llama-windows-msvc-vulkan.7z artifacts\
+
+      - name: Upload artifacts
+        uses: actions/upload-artifact@v6
+        with:
+          name: llama-windows-x64-msvc-vulkan
+          path: build/llama-windows-msvc-vulkan.7z
+          retention-days: 7

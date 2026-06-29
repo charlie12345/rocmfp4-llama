@@ -1,0 +1,486 @@
+name: Linux CI (ROCmFP4)
+
+on:
+  workflow_dispatch: # allows manual triggering
+  push:
+    branches:
+      - master
+      - mtp-rocmfp4-strix
+      - mtp-copilot-pr1
+    paths:
+      - '.github/workflows/build-linux.yml'
+      - '**/CMakeLists.txt'
+      - '**/.cmake'
+      - '**/*.h'
+      - '**/*.hpp'
+      - '**/*.c'
+      - '**/*.cpp'
+
+  pull_request:
+    types: [opened, synchronize, reopened]
+    branches:
+      - master
+      - mtp-rocmfp4-strix
+    paths:
+      - '.github/workflows/build-linux.yml'
+      - '**/CMakeLists.txt'
+      - '**/.cmake'
+      - '**/*.h'
+      - '**/*.hpp'
+      - '**/*.c'
+      - '**/*.cpp'
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.head_ref && github.ref || github.run_id }}
+  cancel-in-progress: true
+
+env:
+  GGML_NLOOP: 3
+  GGML_N_THREADS: 1
+  LLAMA_LOG_COLORS: 1
+  LLAMA_LOG_PREFIX: 1
+  LLAMA_LOG_TIMESTAMPS: 1
+
+jobs:
+  linux-ubuntu-cpu:
+    runs-on: ubuntu-latest
+    name: Linux Ubuntu CPU Build
+
+    steps:
+      - name: Clone
+        id: checkout
+        uses: actions/checkout@v6
+
+      - name: Install Dependencies
+        id: dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y \
+            build-essential \
+            cmake \
+            git \
+            pkg-config \
+            ninja-build \
+            libssl-dev
+
+      - name: ccache
+        uses: ggml-org/ccache-action@v1.2.21
+        with:
+          key: linux-ubuntu-cpu
+          evict-old-files: 1d
+          save: ${{ github.event_name == 'push' && github.ref == 'refs/heads/master' }}
+
+      - name: Build (CPU)
+        id: cmake_build
+        run: |
+          cmake -B build \
+            -DCMAKE_BUILD_TYPE=Release \
+            -DLLAMA_BUILD_SERVER=ON \
+            -DLLAMA_BUILD_WEBUI=OFF \
+            -DLLAMA_USE_PREBUILT_WEBUI=OFF \
+            -DGGML_RPC=ON \
+            -DLLAMA_FATAL_WARNINGS=ON
+          cmake --build build --config Release -j $(nproc)
+
+      - name: Test
+        id: cmake_test
+        run: |
+          cd build
+          ctest -L main -E "test-llama-archs|test-chat" --verbose --timeout 900
+
+      - name: Create artifact archive
+        run: |
+          cd build
+          mkdir -p artifacts
+          cp bin/* artifacts/ 2>/dev/null || true
+          tar -czf llama-linux-ubuntu-cpu.tar.gz artifacts/
+
+      - name: Upload artifacts
+        uses: actions/upload-artifact@v6
+        with:
+          name: llama-linux-ubuntu-cpu
+          path: build/llama-linux-cpu.tar.gz
+          retention-days: 7
+
+  linux-ubuntu-vulkan:
+    runs-on: ubuntu-latest
+    name: Linux Ubuntu Vulkan Build
+
+    steps:
+      - name: Clone
+        id: checkout
+        uses: actions/checkout@v6
+
+      - name: Install Dependencies
+        id: dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y \
+            build-essential \
+            cmake \
+            git \
+            pkg-config \
+            ninja-build \
+            libssl-dev \
+            vulkan-tools \
+            libvulkan-dev \
+            spirv-headers \
+            glslc \
+            gcc-14 \
+            g++-14
+          echo "CC=gcc-14" >> "$GITHUB_ENV"
+          echo "CXX=g++-14" >> "$GITHUB_ENV"
+
+      - name: ccache
+        uses: ggml-org/ccache-action@v1.2.21
+        with:
+          key: linux-ubuntu-vulkan
+          evict-old-files: 1d
+          save: ${{ github.event_name == 'push' && github.ref == 'refs/heads/master' }}
+
+      - name: Build (Vulkan)
+        id: cmake_build
+        run: |
+          cmake -B build \
+            -DCMAKE_BUILD_TYPE=Release \
+            -DGGML_VULKAN=ON \
+            -DGGML_BACKEND_DL=ON \
+            -DGGML_CPU_ALL_VARIANTS=ON \
+            -DLLAMA_BUILD_SERVER=ON \
+            -DLLAMA_BUILD_WEBUI=OFF \
+            -DLLAMA_USE_PREBUILT_WEBUI=OFF \
+            -DGGML_RPC=ON \
+            -DLLAMA_FATAL_WARNINGS=ON
+          cmake --build build --config Release -j $(nproc)
+
+      - name: Test
+        id: cmake_test
+        run: |
+          cd build
+          ctest -L main -E "test-llama-archs|test-chat" --verbose --timeout 900
+
+      - name: Create artifact archive
+        run: |
+          cd build
+          mkdir -p artifacts
+          cp bin/* artifacts/ 2>/dev/null || true
+          tar -czf llama-linux-vulkan.tar.gz artifacts/
+
+      - name: Upload artifacts
+        uses: actions/upload-artifact@v6
+        with:
+          name: llama-linux-ubuntu-vulkan
+          path: build/llama-linux-vulkan.tar.gz
+          retention-days: 7
+
+  linux-rocm-rdna2:
+    runs-on: ubuntu-26.04
+    name: Linux ROCm RDNA2 (gfx1030) Build
+    continue-on-error: true
+
+    steps:
+      - name: Clone
+        id: checkout
+        uses: actions/checkout@v6
+
+      - name: Install Dependencies
+        id: dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y \
+            build-essential \
+            cmake \
+            git \
+            pkg-config \
+            ninja-build \
+            libssl-dev \
+            vulkan-tools \
+            libvulkan-dev \
+            glslc \
+            spirv-headers \
+            wget \
+            gpg
+
+      - name: Install ROCm
+        id: install_rocm
+        run: |
+          sudo mkdir --parents --mode=0755 /etc/apt/keyrings
+          wget https://repo.radeon.com/rocm/rocm.gpg.key -O - | \
+            gpg --dearmor | sudo tee /etc/apt/keyrings/rocm.gpg > /dev/null
+          sudo tee /etc/apt/sources.list.d/rocm.list <<'EOF'
+          deb [arch=amd64 signed-by=/etc/apt/keyrings/rocm.gpg] https://repo.radeon.com/rocm/apt/7.2.4 noble main
+          EOF
+          sudo tee /etc/apt/preferences.d/rocm-pin-600 <<'EOF'
+          Package: *
+          Pin: release o=repo.radeon.com
+          Pin-Priority: 600
+          EOF
+          sudo apt-get update
+          sudo apt-get install -y rocm-hip-sdk rocm-opencl-sdk
+
+      - name: Fix lld libxml2/libicu for ubuntu-26.04
+        id: fix_lld
+        run: |
+          ROCM_LIB="/opt/rocm/lib"
+          cd /tmp
+          wget -q http://archive.ubuntu.com/ubuntu/pool/main/libx/libxml2/libxml2_2.9.14+dfsg-1.3ubuntu3_amd64.deb
+          dpkg-deb -x libxml2_*.deb /tmp/libxml2-extract/
+          sudo cp /tmp/libxml2-extract/usr/lib/x86_64-linux-gnu/libxml2.so.2.9.14 "$ROCM_LIB/"
+          sudo ln -sf libxml2.so.2.9.14 "$ROCM_LIB/libxml2.so.2"
+          wget -q http://archive.ubuntu.com/ubuntu/pool/main/i/icu/libicu74_74.2-1ubuntu3_amd64.deb
+          dpkg-deb -x libicu74_*.deb /tmp/libicu74-extract/
+          sudo cp /tmp/libicu74-extract/usr/lib/x86_64-linux-gnu/libicudata.so.74.2 "$ROCM_LIB/"
+          sudo cp /tmp/libicu74-extract/usr/lib/x86_64-linux-gnu/libicuuc.so.74.2 "$ROCM_LIB/"
+          sudo cp /tmp/libicu74-extract/usr/lib/x86_64-linux-gnu/libicui18n.so.74.2 "$ROCM_LIB/"
+          cd "$ROCM_LIB"
+          sudo ln -sf libicudata.so.74.2 libicudata.so.74
+          sudo ln -sf libicuuc.so.74.2 libicuuc.so.74
+          sudo ln -sf libicui18n.so.74.2 libicui18n.so.74
+
+      - name: ccache
+        uses: ggml-org/ccache-action@v1.2.21
+        with:
+          key: linux-rocm-rdna2
+          evict-old-files: 1d
+          save: ${{ github.event_name == 'push' && github.ref == 'refs/heads/master' }}
+
+      - name: Build (ROCm RDNA2)
+        id: cmake_build
+        run: |
+          HIPCXX="$(hipconfig -l)/clang" HIP_PATH="$(hipconfig -R)" \
+          cmake -S . -B build \
+            -DCMAKE_BUILD_TYPE=Release \
+            -DGGML_HIP=ON \
+            -DGPU_TARGETS=gfx1030 \
+            -DGGML_BACKEND_DL=ON \
+            -DGGML_CPU_ALL_VARIANTS=ON \
+            -DGGML_NATIVE=OFF \
+            -DLLAMA_BUILD_SERVER=ON \
+            -DLLAMA_BUILD_WEBUI=OFF \
+            -DLLAMA_USE_PREBUILT_WEBUI=OFF \
+            -DGGML_RPC=ON \
+            -DLLAMA_FATAL_WARNINGS=ON
+          cmake --build build --config Release -j $(nproc)
+
+      - name: Create artifact archive
+        run: |
+          cd build
+          mkdir -p artifacts
+          cp bin/* artifacts/ 2>/dev/null || true
+          tar -czf llama-linux-rocm-rdna2.tar.gz artifacts/
+
+      - name: Upload artifacts
+        uses: actions/upload-artifact@v6
+        with:
+          name: llama-linux-rocm-rdna2
+          path: build/llama-linux-rocm-rdna2.tar.gz
+          retention-days: 7
+
+  linux-rocm-rdna3:
+    runs-on: ubuntu-26.04
+    name: Linux ROCm RDNA3 (gfx1100) Build
+    continue-on-error: true
+
+    steps:
+      - name: Clone
+        id: checkout
+        uses: actions/checkout@v6
+
+      - name: Install Dependencies
+        id: dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y \
+            build-essential \
+            cmake \
+            git \
+            pkg-config \
+            ninja-build \
+            libssl-dev \
+            vulkan-tools \
+            libvulkan-dev \
+            glslc \
+            spirv-headers \
+            wget \
+            gpg
+
+      - name: Install ROCm
+        id: install_rocm
+        run: |
+          sudo mkdir --parents --mode=0755 /etc/apt/keyrings
+          wget https://repo.radeon.com/rocm/rocm.gpg.key -O - | \
+            gpg --dearmor | sudo tee /etc/apt/keyrings/rocm.gpg > /dev/null
+          sudo tee /etc/apt/sources.list.d/rocm.list <<'EOF'
+          deb [arch=amd64 signed-by=/etc/apt/keyrings/rocm.gpg] https://repo.radeon.com/rocm/apt/7.2.4 noble main
+          EOF
+          sudo tee /etc/apt/preferences.d/rocm-pin-600 <<'EOF'
+          Package: *
+          Pin: release o=repo.radeon.com
+          Pin-Priority: 600
+          EOF
+          sudo apt-get update
+          sudo apt-get install -y rocm-hip-sdk rocm-opencl-sdk
+
+      - name: Fix lld libxml2/libicu for ubuntu-26.04
+        id: fix_lld
+        run: |
+          ROCM_LIB="/opt/rocm/lib"
+          cd /tmp
+          wget -q http://archive.ubuntu.com/ubuntu/pool/main/libx/libxml2/libxml2_2.9.14+dfsg-1.3ubuntu3_amd64.deb
+          dpkg-deb -x libxml2_*.deb /tmp/libxml2-extract/
+          sudo cp /tmp/libxml2-extract/usr/lib/x86_64-linux-gnu/libxml2.so.2.9.14 "$ROCM_LIB/"
+          sudo ln -sf libxml2.so.2.9.14 "$ROCM_LIB/libxml2.so.2"
+          wget -q http://archive.ubuntu.com/ubuntu/pool/main/i/icu/libicu74_74.2-1ubuntu3_amd64.deb
+          dpkg-deb -x libicu74_*.deb /tmp/libicu74-extract/
+          sudo cp /tmp/libicu74-extract/usr/lib/x86_64-linux-gnu/libicudata.so.74.2 "$ROCM_LIB/"
+          sudo cp /tmp/libicu74-extract/usr/lib/x86_64-linux-gnu/libicuuc.so.74.2 "$ROCM_LIB/"
+          sudo cp /tmp/libicu74-extract/usr/lib/x86_64-linux-gnu/libicui18n.so.74.2 "$ROCM_LIB/"
+          cd "$ROCM_LIB"
+          sudo ln -sf libicudata.so.74.2 libicudata.so.74
+          sudo ln -sf libicuuc.so.74.2 libicuuc.so.74
+          sudo ln -sf libicui18n.so.74.2 libicui18n.so.74
+
+      - name: ccache
+        uses: ggml-org/ccache-action@v1.2.21
+        with:
+          key: linux-rocm-rdna3
+          evict-old-files: 1d
+          save: ${{ github.event_name == 'push' && github.ref == 'refs/heads/master' }}
+
+      - name: Build (ROCm RDNA3)
+        id: cmake_build
+        run: |
+          HIPCXX="$(hipconfig -l)/clang" HIP_PATH="$(hipconfig -R)" \
+          cmake -S . -B build \
+            -DCMAKE_BUILD_TYPE=Release \
+            -DGGML_HIP=ON \
+            -DGPU_TARGETS=gfx1100 \
+            -DGGML_BACKEND_DL=ON \
+            -DGGML_CPU_ALL_VARIANTS=ON \
+            -DGGML_NATIVE=OFF \
+            -DLLAMA_BUILD_SERVER=ON \
+            -DLLAMA_BUILD_WEBUI=OFF \
+            -DLLAMA_USE_PREBUILT_WEBUI=OFF \
+            -DGGML_RPC=ON \
+            -DLLAMA_FATAL_WARNINGS=ON
+          cmake --build build --config Release -j $(nproc)
+
+      - name: Create artifact archive
+        run: |
+          cd build
+          mkdir -p artifacts
+          cp bin/* artifacts/ 2>/dev/null || true
+          tar -czf llama-linux-rocm-rdna3.tar.gz artifacts/
+
+      - name: Upload artifacts
+        uses: actions/upload-artifact@v6
+        with:
+          name: llama-linux-rocm-rdna3
+          path: build/llama-linux-rocm-rdna3.tar.gz
+          retention-days: 7
+
+  linux-rocm-strix:
+    runs-on: ubuntu-26.04
+    name: Linux ROCm Strix Halo (gfx1151) Build
+    continue-on-error: true
+
+    steps:
+      - name: Clone
+        id: checkout
+        uses: actions/checkout@v6
+
+      - name: Install Dependencies
+        id: dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y \
+            build-essential \
+            cmake \
+            git \
+            pkg-config \
+            ninja-build \
+            libssl-dev \
+            vulkan-tools \
+            libvulkan-dev \
+            glslc \
+            spirv-headers \
+            wget \
+            gpg
+
+      - name: Install ROCm
+        id: install_rocm
+        run: |
+          sudo mkdir --parents --mode=0755 /etc/apt/keyrings
+          wget https://repo.radeon.com/rocm/rocm.gpg.key -O - | \
+            gpg --dearmor | sudo tee /etc/apt/keyrings/rocm.gpg > /dev/null
+          sudo tee /etc/apt/sources.list.d/rocm.list <<'EOF'
+          deb [arch=amd64 signed-by=/etc/apt/keyrings/rocm.gpg] https://repo.radeon.com/rocm/apt/7.2.4 noble main
+          EOF
+          sudo tee /etc/apt/preferences.d/rocm-pin-600 <<'EOF'
+          Package: *
+          Pin: release o=repo.radeon.com
+          Pin-Priority: 600
+          EOF
+          sudo apt-get update
+          sudo apt-get install -y rocm-hip-sdk rocm-opencl-sdk
+
+      - name: Fix lld libxml2/libicu for ubuntu-26.04
+        id: fix_lld_strix
+        run: |
+          ROCM_LIB="/opt/rocm/lib"
+          cd /tmp
+          wget -q http://archive.ubuntu.com/ubuntu/pool/main/libx/libxml2/libxml2_2.9.14+dfsg-1.3ubuntu3_amd64.deb
+          dpkg-deb -x libxml2_*.deb /tmp/libxml2-extract-strix/
+          sudo cp /tmp/libxml2-extract-strix/usr/lib/x86_64-linux-gnu/libxml2.so.2.9.14 "$ROCM_LIB/"
+          sudo ln -sf libxml2.so.2.9.14 "$ROCM_LIB/libxml2.so.2"
+          wget -q http://archive.ubuntu.com/ubuntu/pool/main/i/icu/libicu74_74.2-1ubuntu3_amd64.deb
+          dpkg-deb -x libicu74_*.deb /tmp/libicu74-extract-strix/
+          sudo cp /tmp/libicu74-extract-strix/usr/lib/x86_64-linux-gnu/libicudata.so.74.2 "$ROCM_LIB/"
+          sudo cp /tmp/libicu74-extract-strix/usr/lib/x86_64-linux-gnu/libicuuc.so.74.2 "$ROCM_LIB/"
+          sudo cp /tmp/libicu74-extract-strix/usr/lib/x86_64-linux-gnu/libicui18n.so.74.2 "$ROCM_LIB/"
+          cd "$ROCM_LIB"
+          sudo ln -sf libicudata.so.74.2 libicudata.so.74
+          sudo ln -sf libicuuc.so.74.2 libicuuc.so.74
+          sudo ln -sf libicui18n.so.74.2 libicui18n.so.74
+
+      - name: ccache
+        uses: ggml-org/ccache-action@v1.2.21
+        with:
+          key: linux-rocm-strix
+          evict-old-files: 1d
+          save: ${{ github.event_name == 'push' && github.ref == 'refs/heads/master' }}
+
+      - name: Build (ROCm Strix Halo)
+        id: cmake_build
+        run: |
+          HIPCXX="$(hipconfig -l)/clang" HIP_PATH="$(hipconfig -R)" \
+          cmake -S . -B build \
+            -DCMAKE_BUILD_TYPE=Release \
+            -DGGML_HIP=ON \
+            -DGPU_TARGETS=gfx1151 \
+            -DGGML_BACKEND_DL=ON \
+            -DGGML_CPU_ALL_VARIANTS=ON \
+            -DGGML_NATIVE=OFF \
+            -DLLAMA_BUILD_SERVER=ON \
+            -DLLAMA_BUILD_WEBUI=OFF \
+            -DLLAMA_USE_PREBUILT_WEBUI=OFF \
+            -DGGML_RPC=ON \
+            -DGGML_HIP_NO_VMM=ON \
+            -DGGML_HIP_ROCWMMA_FATTN=OFF \
+            -DGGML_HIP_MMQ_MFMA=ON \
+            -DLLAMA_FATAL_WARNINGS=ON
+          cmake --build build --config Release -j $(nproc)
+
+      - name: Create artifact archive
+        run: |
+          cd build
+          mkdir -p artifacts
+          cp bin/* artifacts/ 2>/dev/null || true
+          tar -czf llama-linux-rocm-strix.tar.gz artifacts/
+
+      - name: Upload artifacts
+        uses: actions/upload-artifact@v6
+        with:
+          name: llama-linux-rocm-strix
+          path: build/llama-linux-rocm-strix.tar.gz
+          retention-days: 7
