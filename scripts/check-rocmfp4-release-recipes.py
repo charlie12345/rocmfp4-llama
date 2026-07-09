@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
 
 import csv
+import logging
 import re
 from pathlib import Path
 
@@ -61,4 +62,5 @@ for line_number, row in enumerate(rows, start=2):
 if len(rows) != 7:
     fail(f"expected 7 released ROCmFP4 artifacts, found {len(rows)}")
 
-print("ROCmFP4 release recipe check passed (7 artifacts)")
+logging.basicConfig(level=logging.INFO, format="%(message)s")
+logging.info("ROCmFP4 release recipe check passed (7 artifacts)")
