@@ -1,0 +1,25 @@
+name: ROCmFP4 release recipe check
+
+on:
+  push:
+    paths:
+      - '.github/workflows/check-rocmfp4-release-recipes.yml'
+      - 'docs/ROCmFP4-RELEASE-RECIPES.md'
+      - 'docs/rocmfp4-release-recipe-map.tsv'
+      - 'scripts/check-rocmfp4-release-recipes.sh'
+  pull_request:
+    paths:
+      - '.github/workflows/check-rocmfp4-release-recipes.yml'
+      - 'docs/ROCmFP4-RELEASE-RECIPES.md'
+      - 'docs/rocmfp4-release-recipe-map.tsv'
+      - 'scripts/check-rocmfp4-release-recipes.sh'
+
+permissions:
+  contents: read
+
+jobs:
+  release-recipe-map:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v6
+      - run: scripts/check-rocmfp4-release-recipes.sh
