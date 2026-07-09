@@ -11,6 +11,10 @@ range while preserving a fast integer-dot backend shape.
 This directory owns the format-specific implementation. The rest of ggml only
 registers and dispatches the type.
 
+Released artifact names and architecture-qualified recipe contracts are listed
+in [`docs/ROCmFP4-RELEASE-RECIPES.md`](../../docs/ROCmFP4-RELEASE-RECIPES.md).
+The public model name is distinct from its quantization recipe.
+
 Current status:
 - The format runs on CPU, Vulkan, and ROCm/HIP in this custom tree.
 - `Q4_0_ROCMFP4` is the pure 4.50 BPW dual-scale path.
