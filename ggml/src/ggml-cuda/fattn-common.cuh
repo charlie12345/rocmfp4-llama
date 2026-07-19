@@ -485,14 +485,24 @@ static __device__ __forceinline__ void dequantize_V_q4_0(const void * __restrict
     const int     iqs   =  i0          % (QK4_0/2);
     const int     shift = (i0 % QK4_0) / (QK4_0/2);
 
-    int q;
-    static_assert(ne == 2 || ne == 4, "bad ne");
-    ggml_cuda_memcpy_1<ne, 2>(&q, x[ib].qs + iqs);
-    q >>= 4*shift;
-    q &= 0x0F0F0F0F;
-    q = __vsubss4(q, 0x08080808);
-
-    const int8_t * q8 = (const int8_t *) &q;
+    static_assert(ne == 2 || ne == 4 || ne == 8, "bad ne");
+    // Dequant in <=4-byte chunks so ne==8 (used by the tile dequant-on-load path) works;
+    // ne==2/4 (the vec path) are unchanged. 8-aligned i0 keeps each chunk within one nibble half.
+    int8_t q8[ne];
+#pragma unroll
+    for (int l0 = 0; l0 < ne; l0 += 4) {
+        constexpr int nb = ne < 4 ? ne : 4;
+        int q;
+        ggml_cuda_memcpy_1<nb, 2>(&q, x[ib].qs + iqs + l0);
+        q >>= 4*shift;
+        q &= 0x0F0F0F0F;
+        q = __vsubss4(q, 0x08080808);
+        const int8_t * qq = (const int8_t *) &q;
+#pragma unroll
+        for (int j = 0; j < nb; ++j) {
+            q8[l0 + j] = qq[j];
+        }
+    }
 
 #ifdef FP16_AVAILABLE
     if constexpr (std::is_same_v<T, half>) {
@@ -524,13 +534,21 @@ static __device__ __forceinline__ void dequantize_V_q4_1(const void * __restrict
     const int     iqs   =  i0          % (QK4_1/2);
     const int     shift = (i0 % QK4_1) / (QK4_1/2);
 
-    int q;
-    static_assert(ne == 2 || ne == 4, "bad ne");
-    ggml_cuda_memcpy_1<ne>(&q, x[ib].qs + iqs);
-    q >>= 4*shift;
-    q &= 0x0F0F0F0F;
-
-    const int8_t * q8 = (const int8_t *) &q;
+    static_assert(ne == 2 || ne == 4 || ne == 8, "bad ne");
+    int8_t q8[ne];
+#pragma unroll
+    for (int l0 = 0; l0 < ne; l0 += 4) {
+        constexpr int nb = ne < 4 ? ne : 4;
+        int q;
+        ggml_cuda_memcpy_1<nb>(&q, x[ib].qs + iqs + l0);
+        q >>= 4*shift;
+        q &= 0x0F0F0F0F;
+        const int8_t * qq = (const int8_t *) &q;
+#pragma unroll
+        for (int j = 0; j < nb; ++j) {
+            q8[l0 + j] = qq[j];
+        }
+    }
 
 #ifdef FP16_AVAILABLE
     if constexpr (std::is_same_v<T, half>) {
@@ -565,24 +583,28 @@ static __device__ __forceinline__ void dequantize_V_q5_0(const void * __restrict
     const int     iqs   =  i0          % (QK5_0/2);
     const int     shift = (i0 % QK5_0) / (QK5_0/2);
 
-    int q;
-    static_assert(ne == 2 || ne == 4, "bad ne");
-    ggml_cuda_memcpy_1<ne, 2>(&q, x[ib].qs + iqs);
-    q >>= 4*shift;
-    q &= 0x0F0F0F0F;
-
-    {
-        int qh;
-        ggml_cuda_memcpy_1<ne, 2>(&qh, x[ib].qh);
+    static_assert(ne == 2 || ne == 4 || ne == 8, "bad ne");
+    int qh;
+    ggml_cuda_memcpy_1<4, 2>(&qh, x[ib].qh);
+    int8_t q8[ne];
 #pragma unroll
-        for (int l = 0; l < ne; ++l) {
-            q |= ((qh >> (idq + l)) & 0x00000001) << (8*l + 4);
+    for (int l0 = 0; l0 < ne; l0 += 4) {
+        constexpr int nb = ne < 4 ? ne : 4;
+        int q;
+        ggml_cuda_memcpy_1<nb, 2>(&q, x[ib].qs + iqs + l0);
+        q >>= 4*shift;
+        q &= 0x0F0F0F0F;
+#pragma unroll
+        for (int l = 0; l < nb; ++l) {
+            q |= ((qh >> (idq + l0 + l)) & 0x00000001) << (8*l + 4);
+        }
+        q = __vsubss4(q, 0x10101010);
+        const int8_t * qq = (const int8_t *) &q;
+#pragma unroll
+        for (int j = 0; j < nb; ++j) {
+            q8[l0 + j] = qq[j];
         }
     }
-
-    q = __vsubss4(q, 0x10101010);
-
-    const int8_t * q8 = (const int8_t *) &q;
 
 #ifdef FP16_AVAILABLE
     if constexpr (std::is_same_v<T, half>) {
@@ -615,22 +637,27 @@ static __device__ __forceinline__ void dequantize_V_q5_1(const void * __restrict
     const int     iqs   =  i0          % (QK5_1/2);
     const int     shift = (i0 % QK5_1) / (QK5_1/2);
 
-    int q;
-    static_assert(ne == 2 || ne == 4, "bad ne");
-    ggml_cuda_memcpy_1<ne>(&q, x[ib].qs + iqs);
-    q >>= 4*shift;
-    q &= 0x0F0F0F0F;
-
-    {
-        int qh;
-        ggml_cuda_memcpy_1<ne>(&qh, x[ib].qh);
+    static_assert(ne == 2 || ne == 4 || ne == 8, "bad ne");
+    int qh;
+    ggml_cuda_memcpy_1<4>(&qh, x[ib].qh);
+    int8_t q8[ne];
 #pragma unroll
-        for (int l = 0; l < ne; ++l) {
-            q |= ((qh >> (idq + l)) & 0x00000001) << (8*l + 4);
+    for (int l0 = 0; l0 < ne; l0 += 4) {
+        constexpr int nb = ne < 4 ? ne : 4;
+        int q;
+        ggml_cuda_memcpy_1<nb>(&q, x[ib].qs + iqs + l0);
+        q >>= 4*shift;
+        q &= 0x0F0F0F0F;
+#pragma unroll
+        for (int l = 0; l < nb; ++l) {
+            q |= ((qh >> (idq + l0 + l)) & 0x00000001) << (8*l + 4);
+        }
+        const int8_t * qq = (const int8_t *) &q;
+#pragma unroll
+        for (int j = 0; j < nb; ++j) {
+            q8[l0 + j] = qq[j];
         }
     }
-
-    const int8_t * q8 = (const int8_t *) &q;
 
 #ifdef FP16_AVAILABLE
     if constexpr (std::is_same_v<T, half>) {
