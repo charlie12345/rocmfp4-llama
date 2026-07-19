@@ -546,7 +546,9 @@ static best_fattn_kernel ggml_cuda_get_best_fattn_kernel(const int device, const
                  K->type == GGML_TYPE_Q4_0 ||
                  K->type == GGML_TYPE_Q4_1 ||
                  K->type == GGML_TYPE_Q5_0 ||
-                 K->type == GGML_TYPE_Q5_1);
+                 K->type == GGML_TYPE_Q5_1 ||
+                 K->type == GGML_TYPE_Q4_0_ROCMFP4 ||
+                 K->type == GGML_TYPE_Q4_0_ROCMFP4_FAST);
             if (!no_tile_kvq && gqa_opt_applies && K->ne[0] == 128 && V->ne[0] == 128 && kv_tile_dequant_ok) {
                 return BEST_FATTN_KERNEL_TILE;
             }
