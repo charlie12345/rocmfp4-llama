@@ -183,6 +183,12 @@ llama_model_qwen35moe::graph::graph(const llama_model & model, const llm_graph_p
     // MTP/NextN layers are loaded as extra decoder blocks but not executed in the main pass.
     const int n_transformer_layers = n_layer - (int) hparams.nextn_predict_layers;
     for (int il = 0; il < n_transformer_layers; ++il) {
+        // expose per-layer inputs for spec-decode feature extraction
+        // (eagle3/dflash target_layers). Without this the graph never
+        // populates t_layer_inp, and a draft that extracts target hidden
+        // states aborts in llm_graph_result with "layer input tensor is null".
+        res->t_layer_inp[il] = inpL;
+
         ggml_tensor * inpSA = inpL;
 
         cur = build_norm(inpL, model.layers[il].attn_norm, nullptr, LLM_NORM_RMS, il);
